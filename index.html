@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interaktive Funktionsuntersuchung</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/13.2.0/math.min.js"></script>
+<style>
+  :root { font-family: Arial, Helvetica, sans-serif; color: #172033; background: #f4f6fa; }
+  body { margin: 0; padding: 22px; }
+  main { max-width: 1180px; margin: auto; background: white; border-radius: 16px; padding: 22px; box-shadow: 0 5px 24px #17203312; }
+  h1 { margin: 0 0 8px; font-size: 25px; }
+  .sub { color: #596579; margin: 0 0 18px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 14px; background: #f6f8fc; border-radius: 12px; }
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; font-weight: 700; color: #39465c; }
+  input { font: inherit; border: 1px solid #cbd3df; border-radius: 7px; padding: 10px 11px; min-width: 150px; }
+  #functionInput { min-width: min(320px, 70vw); }
+  button { border: 0; border-radius: 8px; padding: 11px 18px; font-weight: 700; cursor: pointer; background: #2457c5; color: white; }
+  button.secondary { background: #e6ebf4; color: #26354d; }
+  button:hover { filter: brightness(.96); }
+  #status { min-height: 20px; color: #a12c2c; font-size: 13px; padding: 8px 2px 0; }
+  #readout { background: #edf4ff; border-radius: 9px; padding: 11px 14px; margin-top: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  #chart { width: 100%; height: 690px; }
+  .hint { color: #647086; font-size: 13px; margin: 10px 2px 0; }
+  @media(max-width:650px) { body { padding: 8px; } main { padding: 13px; } #chart { height: 620px; } input { min-width: 110px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Funktionsuntersuchung</h1>
+  <p class="sub">Funktion, erste und zweite Ableitung – dynamisch und interaktiv</p>
+
+  <div class="controls">
+    <label>Funktionsgleichung f(x)
+      <input id="functionInput" value="0.01x^4-0.3x^2" spellcheck="false">
+    </label>
+    <button id="applyFunction">Funktion übernehmen</button>
+    <label>x-Wert
+      <input id="xInput" type="number" step="0.01" value="-4">
+    </label>
+    <button id="applyX" class="secondary">Übernehmen</button>
+    <button id="pauseButton" class="secondary">Pause</button>
+  </div>
+  <div id="status" role="status"></div>
+  <div id="readout">x = −4.00</div>
+  <div id="chart"></div>
+  <p class="hint">Tipp: Du kannst den roten Punkt im oberen Graphen mit der Maus ziehen oder auf eine Stelle im Graphen klicken. Mit der Leertaste pausierst bzw. startest du die Animation.</p>
+</main>
+
+<script>
+(() => {
+  const xmin = -5, xmax = 5, interval = 16, speed = 0.025;
+  let currentX = -4, paused = false, dragging = false, timer = null;
+  let expression, firstDerivative, secondDerivative;
+  const chart = document.getElementById('chart');
+  const functionInput = document.getElementById('functionInput');
+  const xInput = document.getElementById('xInput');
+  const status = document.getElementById('status');
+  const readout = document.getElementById('readout');
+  const pauseButton = document.getElementById('pauseButton');
+
+  // Erlaubt auch Schreibweisen wie 0.01x^4 oder 2(x+1).
+  function normalizeExpression(source) {
+    let s = source.replace(/\s+/g, '');
+    s = s.replace(/(\d)(x|pi|e|sin|cos|tan|sqrt|log|exp)\b/gi, '$1*$2');
+    s = s.replace(/(x|\))(?=(x|\d|pi|e|sin|cos|tan|sqrt|log|exp|\())/gi, '$1*');
+    s = s.replace(/(\d)\(/g, '$1*(');
+    return s.replace(/\^/g, '^');
+  }
+
+  function compileFunction(source) {
+    const node = math.parse(normalizeExpression(source));
+    const allowed = new Set(['x', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+      'sqrt', 'abs', 'log', 'log10', 'exp', 'pi', 'e']);
+    node.traverse((child) => {
+      if (child.isSymbolNode && !allowed.has(child.name)) {
+        throw new Error('Nicht erlaubtes Symbol: ' + child.name);
+      }
+    });
+    const fNode = node;
+    const d1 = math.derivative(fNode, 'x');
+    const d2 = math.derivative(d1, 'x');
+    const f = fNode.compile(), f1 = d1.compile(), f2 = d2.compile();
+    const safe = compiled => value => {
+      try {
+        const result = compiled.evaluate({x: value});
+        return typeof result === 'number' && Number.isFinite(result) ? result : NaN;
+      } catch (_) { return NaN; }
+    };
+    return {f: safe(f), f1: safe(f1), f2: safe(f2),
+      latex: fNode.toTex(), d1latex: d1.toTex(), d2latex: d2.toTex()};
+  }
+
+  function values(fn, xs) { return xs.map(x => fn(x)); }
+  const xs = Array.from({length: 1001}, (_, i) => xmin + (xmax-xmin)*i/1000);
+
+  function trace(y, name, color, row) {
+    return {x: xs, y: values(y, xs), type: 'scatter', mode: 'lines',
+      name, line: {color, width: 2.5}, xaxis: 'x', yaxis: row === 1 ? 'y' : row === 2 ? 'y2' : 'y3',
+      hovertemplate: 'x=%{x:.2f}<br>y=%{y:.3f}<extra>'+name+'</extra>'};
+  }
+  function markerTrace(y, color, row) {
+    return {x: [currentX], y: [y(currentX)], type: 'scatter', mode: 'markers',
+      marker: {color, size: 12, line: {color: 'white', width: 1}},
+      showlegend: false, hoverinfo: 'skip',
+      xaxis: 'x', yaxis: row === 1 ? 'y' : row === 2 ? 'y2' : 'y3'};
+  }
+
+  function makeLayout() {
+    return {
+      margin: {l: 76, r: 25, t: 35, b: 48},
+      paper_bgcolor: 'white', plot_bgcolor: 'white',
+      showlegend: false, dragmode: false,
+      xaxis: {range: [xmin, xmax], domain: [0,1], anchor: 'y3',
+        showgrid: true, gridcolor: '#e5e9f0', zeroline: true, zerolinecolor: '#333'},
+      yaxis: {domain: [0.70, 1], title: 'f(x)', showgrid: true, gridcolor: '#e5e9f0', zeroline: true, zerolinecolor: '#333'},
+      yaxis2: {domain: [0.37, 0.64], title: "f'(x)", showgrid: true, gridcolor: '#e5e9f0', zeroline: true, zerolinecolor: '#333'},
+      yaxis3: {domain: [0.04, 0.31], title: "f''(x)", showgrid: true, gridcolor: '#e5e9f0', zeroline: true, zerolinecolor: '#333'},
+      annotations: [
+        {text: 'Funktion', x: 0, y: 1.04, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', font: {size: 14}},
+        {text: '1. Ableitung', x: 0, y: 0.66, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', font: {size: 14}},
+        {text: '2. Ableitung', x: 0, y: 0.33, xref: 'paper', yref: 'paper', showarrow: false, xanchor: 'left', font: {size: 14}}
+      ]
+    };
+  }
+
+  function updateReadout() {
+    const a = expression.f(currentX), b = expression.f1(currentX), c = expression.f2(currentX);
+    readout.textContent = `x = ${currentX.toFixed(2)}     f(x) = ${fmt(a)}     f′(x) = ${fmt(b)}     f″(x) = ${fmt(c)}`;
+    xInput.value = currentX.toFixed(2);
+  }
+  function fmt(v) { return Number.isFinite(v) ? v.toFixed(3) : 'nicht definiert'; }
+
+  function updatePoint() {
+    const y = expression.f(currentX), slope = expression.f1(currentX);
+    const tangentX = [currentX - 1.5, currentX + 1.5];
+    const tangentY = tangentX.map(t => y + slope*(t-currentX));
+    Plotly.restyle(chart, {x: [[currentX]], y: [[y]]}, [3]);
+    Plotly.restyle(chart, {x: [[currentX]], y: [[expression.f1(currentX)]]}, [4]);
+    Plotly.restyle(chart, {x: [[currentX]], y: [[expression.f2(currentX)]]}, [5]);
+    Plotly.restyle(chart, {x: [tangentX], y: [tangentY]}, [6]);
+    updateReadout();
+  }
+
+  function renderAll() {
+    const data = [
+      trace(expression.f, 'f(x)', '#2457c5', 1),
+      trace(expression.f1, "f'(x)", '#e58a18', 2),
+      trace(expression.f2, "f''(x)", '#8051b8', 3),
+      markerTrace(expression.f, '#df3030', 1),
+      markerTrace(expression.f1, '#df3030', 2),
+      markerTrace(expression.f2, '#df3030', 3),
+      {x: [currentX-1.5, currentX+1.5],
+       y: [expression.f(currentX)-1.5*expression.f1(currentX), expression.f(currentX)+1.5*expression.f1(currentX)],
+       type:'scatter', mode:'lines', line:{color:'#17834b', width:2, dash:'dash'},
+       showlegend:false, hoverinfo:'skip'}
+    ];
+    return Plotly.newPlot(chart, data, makeLayout(), {responsive:true, displaylogo:false,
+      modeBarButtonsToRemove:['zoom2d','pan2d','select2d','lasso2d','autoScale2d']});
+  }
+
+  function applyFunction() {
+    try {
+      const next = compileFunction(functionInput.value);
+      expression = next;
+      status.textContent = '';
+      renderAll().then(updateReadout);
+    } catch (error) {
+      status.textContent = 'Fehler in der Funktion: ' + error.message;
+    }
+  }
+  function setX(value) {
+    const n = Number(String(value).replace(',', '.'));
+    if (!Number.isFinite(n) || n < xmin || n > xmax) {
+      status.textContent = `Bitte einen gültigen x-Wert zwischen ${xmin} und ${xmax} eingeben.`;
+      return;
+    }
+    status.textContent = '';
+    currentX = n;
+    updatePoint();
+  }
+
+  document.getElementById('applyFunction').addEventListener('click', applyFunction);
+  document.getElementById('applyX').addEventListener('click', () => setX(xInput.value));
+  xInput.addEventListener('keydown', e => { if (e.key === 'Enter') setX(xInput.value); });
+  function togglePause() {
+    paused = !paused;
+    pauseButton.textContent = paused ? 'Weiter' : 'Pause';
+  }
+  pauseButton.addEventListener('click', togglePause);
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && !['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) {
+      e.preventDefault(); togglePause();
+    }
+  });
+
+  // Klick im oberen Graphen setzt den x-Wert. Ziehen des roten Punktes bewegt ihn kontinuierlich.
+  chart.addEventListener('plotly_click', event => {
+    if (event.points && event.points.length && event.points[0].yaxis && event.points[0].yaxis._id === 'y') {
+      setX(event.points[0].x);
+    }
+  });
+  chart.addEventListener('pointerdown', event => {
+    const rect = chart.getBoundingClientRect();
+    const fl = chart._fullLayout;
+    if (!fl || !fl.xaxis || !fl.yaxis) return;
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const markerPx = fl.xaxis.d2p(currentX) + fl.xaxis._offset;
+    const markerPy = fl.yaxis.d2p(expression.f(currentX)) + fl.yaxis._offset;
+    if (Math.hypot(px-markerPx, py-markerPy) < 24) {
+      dragging = true; pausedBeforeDrag = paused; paused = true;
+      chart.setPointerCapture?.(event.pointerId);
+    }
+  });
+  let pausedBeforeDrag = false;
+  chart.addEventListener('pointermove', event => {
+    if (!dragging || !chart._fullLayout) return;
+    const rect = chart.getBoundingClientRect();
+    const pixel = event.clientX - rect.left - chart._fullLayout.xaxis._offset;
+    const x = chart._fullLayout.xaxis.p2d(pixel);
+    if (Number.isFinite(x)) {
+      currentX = Math.max(xmin, Math.min(xmax, x));
+      updatePoint();
+    }
+  });
+  function stopDrag() {
+    if (!dragging) return;
+    dragging = false;
+    paused = pausedBeforeDrag;
+    pauseButton.textContent = paused ? 'Weiter' : 'Pause';
+  }
+  chart.addEventListener('pointerup', stopDrag);
+  chart.addEventListener('pointercancel', stopDrag);
+  chart.addEventListener('pointerleave', stopDrag);
+
+  expression = compileFunction(functionInput.value);
+  renderAll().then(updateReadout);
+  timer = setInterval(() => {
+    if (!paused && !dragging) {
+      currentX += speed;
+      if (currentX > xmax) currentX = xmin;
+      updatePoint();
+    }
+  }, interval);
+})();
+</script>
+</body>
+</html>
